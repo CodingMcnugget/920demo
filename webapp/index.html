@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FZYT-28 云台控制</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1a1d21; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #2563eb; --accent-text: #ffffff;
+    --ok: #16a34a; --warn: #d97706; --danger: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1115; --card: #181b21; --text: #e6e8eb; --muted: #9aa3ad;
+      --line: #2a2f38; --accent: #3b82f6;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --card: #181b21; --text: #e6e8eb; --muted: #9aa3ad;
+    --line: #2a2f38; --accent: #3b82f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 16px; max-width: 520px; margin-inline: auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button {
+    font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    border-radius: 10px; padding: 12px 14px; cursor: pointer; min-width: 64px;
+    touch-action: manipulation; user-select: none;
+  }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  button.danger { color: var(--danger); }
+  button.hold { padding: 18px 14px; font-weight: 600; }
+  button.hold.active { background: var(--accent); color: var(--accent-text); border-color: transparent; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .grid button { min-width: 0; }
+  .pos { font-size: 40px; font-weight: 600; letter-spacing: -0.5px; line-height: 1.1; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--muted); margin-right: 6px; }
+  .dot.on { background: var(--ok); }
+  input[type=range] { width: 100%; }
+  input[type=text] {
+    font: inherit; flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  }
+  pre {
+    margin: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px; height: 180px; overflow: auto; font: 12px/1.45 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .warn { color: var(--warn); font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>FZYT-28 云台控制</h1>
+
+<div class="card">
+  <div class="row">
+    <span><span id="dot" class="dot"></span><span id="state">未连接</span></span>
+    <span style="flex:1"></span>
+    <button id="btnConnect" class="primary">连接电机</button>
+    <button id="btnDisconnect" disabled>断开</button>
+  </div>
+  <div id="support" class="warn" hidden>这个浏览器不支持 Web Bluetooth。请用电脑或安卓上的 Chrome / Edge；iPhone 的 Safari 不支持。</div>
+</div>
+
+<div class="card">
+  <div class="muted">当前位置</div>
+  <div class="pos"><span id="deg">--</span>°</div>
+  <div class="muted"><span id="counts">--</span> 计数 · 扭矩 <span id="torque">--</span></div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <span class="muted">按住持续转动</span>
+    <span><b id="speedVal">60</b>°/s</span>
+  </div>
+  <input id="speed" type="range" min="10" max="360" value="60" step="10">
+  <div class="grid" style="grid-template-columns:1fr 1fr; margin-top:8px">
+    <button id="holdL" class="hold">◀◀ 按住左转</button>
+    <button id="holdR" class="hold">按住右转 ▶▶</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="muted" style="margin-bottom:8px">点动（相对当前位置）</div>
+  <div class="grid">
+    <button data-jog="-45">◀ 45°</button>
+    <button data-jog="-15">◀ 15°</button>
+    <button data-jog="15">15° ▶</button>
+    <button data-jog="45">45° ▶</button>
+    <button data-jog="-5">◀ 5°</button>
+    <button data-jog="-1">◀ 1°</button>
+    <button data-jog="1">1° ▶</button>
+    <button data-jog="5">5° ▶</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <span class="muted">转到绝对角度</span>
+    <span><b id="sliderVal">0</b>°</span>
+  </div>
+  <input id="slider" type="range" min="0" max="359" value="0" step="1">
+  <div class="row" style="margin-top:8px">
+    <button data-go="0">0°</button>
+    <button data-go="90">90°</button>
+    <button data-go="180">180°</button>
+    <button data-go="270">270°</button>
+    <span style="flex:1"></span>
+    <button id="btnGo" class="primary">转到</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <button id="btnTorqueOn">扭矩开</button>
+    <button id="btnTorqueOff" class="danger">扭矩关（松开）</button>
+    <span style="flex:1"></span>
+    <label class="muted"><input id="pollOn" type="checkbox" checked> 自动刷新位置</label>
+    <button id="btnPos">读位置</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <span class="muted">舵机（GPIO4）</span>
+    <span><b id="servoVal">90</b>°</span>
+  </div>
+  <input id="servo" type="range" min="0" max="180" value="90" step="1">
+  <div class="row" style="margin-top:8px">
+    <button data-servo="0">0°</button>
+    <button data-servo="90">90°</button>
+    <button data-servo="180">180°</button>
+    <span style="flex:1"></span>
+    <button id="btnServoOff">松开</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
+    <span class="muted">灯（GPIO5）</span>
+    <span><b id="ledVal">0</b>%</span>
+  </div>
+  <input id="led" type="range" min="0" max="100" value="0" step="1">
+  <div class="row" style="margin-top:8px">
+    <button data-led="0">关</button>
+    <button data-led="25">25%</button>
+    <button data-led="50">50%</button>
+    <button data-led="100">全亮</button>
+    <span style="flex:1"></span>
+    <button id="btnLedFade">2 秒渐变</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <input id="cmd" type="text" placeholder="任意命令，例如 st read 0x38 2" autocomplete="off">
+    <button id="btnSend">发送</button>
+  </div>
+  <pre id="log" style="margin-top:8px"></pre>
+</div>
+
+<script>
+// 与固件里的 Nordic UART 服务对应（fzyt28_bringup.ino 的 BLE_*_UUID）
+const SVC = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const RX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';   // 我们写
+const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // 电机通知
+
+const $ = id => document.getElementById(id);
+let device = null, rxChar = null, pollTimer = null, busy = false;
+const enc = new TextEncoder(), dec = new TextDecoder();
+
+function log(line, dir) {
+  const el = $('log');
+  const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  el.textContent += `${t} ${dir || ' '} ${line}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setConnected(on, name) {
+  $('dot').classList.toggle('on', on);
+  $('state').textContent = on ? `已连接 ${name}` : '未连接';
+  $('btnConnect').disabled = on;
+  $('btnDisconnect').disabled = !on;
+  document.querySelectorAll('[data-jog],[data-go],[data-servo],[data-led],#btnGo,#btnTorqueOn,#btnTorqueOff,#btnPos,#btnSend,#btnServoOff,#btnLedFade,.hold')
+    .forEach(b => b.disabled = !on);
+  if (!on) { $('deg').textContent = '--'; $('counts').textContent = '--'; $('torque').textContent = '--'; }
+}
+
+// 电机的回应是文本行，从中挑出位置和扭矩状态
+function onNotify(ev) {
+  const text = dec.decode(ev.target.value);
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    log(line.trim(), '←');
+    const m = line.match(/当前位置 = (\d+) 计数 = ([\d.]+)°/);
+    if (m) { $('counts').textContent = m[1]; $('deg').textContent = m[2]; }
+    const t = line.match(/扭矩 = (开|关)/);
+    if (t) $('torque').textContent = t[1];
+    const g = line.match(/^OK (go|jog) -> ([\d.]+)°/);
+    if (g) $('torque').textContent = '开';
+  }
+}
+
+async function send(cmd) {
+  if (!rxChar) return;
+  log(cmd, '→');
+  const data = enc.encode(cmd + '\n');
+  try {
+    if (rxChar.properties.writeWithoutResponse) await rxChar.writeValueWithoutResponse(data);
+    else await rxChar.writeValue(data);
+  } catch (e) { log('发送失败: ' + e.message, '!'); }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) { $('support').hidden = false; return; }
+  try {
+    device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+    device.addEventListener('gattserverdisconnected', () => { stopPoll(); setConnected(false); log('连接断开', '!'); });
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(SVC);
+    rxChar = await svc.getCharacteristic(RX);
+    const txChar = await svc.getCharacteristic(TX);
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', onNotify);
+    setConnected(true, device.name || '');
+    log('已连接 ' + device.name, '!');
+    await send('st pos');
+    startPoll();
+  } catch (e) {
+    log('连接失败: ' + e.message, '!');
+  }
+}
+
+function disconnect() {
+  holdEnd();
+  stopPoll();
+  if (device && device.gatt.connected) device.gatt.disconnect();
+  setConnected(false);
+}
+
+// 每 700ms 读一次位置。发命令时略过一轮，避免和按钮命令挤在一起
+function startPoll() {
+  stopPoll();
+  pollTimer = setInterval(() => { if (!busy && $('pollOn').checked) send('st pos'); }, 700);
+}
+function stopPoll() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+
+async function action(cmd) {
+  busy = true;
+  await send(cmd);
+  setTimeout(() => { busy = false; }, 300);
+}
+
+// 按住持续转动：按下每 300ms 发一次 st run（固件 700ms 没收到就自动停），松开发 st stop
+let holdTimer = null;
+function holdStart(btn, sign) {
+  if (!rxChar || holdTimer) return;
+  btn.classList.add('active');
+  busy = true;                                   // 按住期间暂停位置轮询，让总线只跑 run
+  const tick = () => send('st run ' + (sign * parseInt($('speed').value)));
+  tick();
+  holdTimer = setInterval(tick, 300);
+}
+function holdEnd() {
+  if (!holdTimer) return;
+  clearInterval(holdTimer); holdTimer = null;
+  document.querySelectorAll('.hold').forEach(b => b.classList.remove('active'));
+  send('st stop');
+  setTimeout(() => { busy = false; }, 300);
+}
+for (const [id, sign] of [['holdL', -1], ['holdR', 1]]) {
+  const b = $(id);
+  b.addEventListener('pointerdown', e => { e.preventDefault(); b.setPointerCapture(e.pointerId); holdStart(b, sign); });
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) b.addEventListener(ev, holdEnd);
+  b.addEventListener('contextmenu', e => e.preventDefault());
+}
+window.addEventListener('blur', holdEnd);
+$('speed').oninput = () => { $('speedVal').textContent = $('speed').value; };
+
+// 舵机 / 灯：滑条拖动时限流，最多每 120ms 发一次，松手再发最终值
+function throttled(fn, ms) {
+  let t = null, last = 0, pending = null;
+  return v => {
+    pending = v;
+    const now = Date.now();
+    if (now - last >= ms) { last = now; fn(pending); pending = null; }
+    else if (!t) t = setTimeout(() => { t = null; last = Date.now(); if (pending !== null) { fn(pending); pending = null; } }, ms - (now - last));
+  };
+}
+const servoSend = throttled(v => send('servo ' + v), 120);
+const ledSend = throttled(v => send('led ' + v), 120);
+$('servo').oninput = () => { $('servoVal').textContent = $('servo').value; servoSend($('servo').value); };
+$('servo').onchange = () => send('servo ' + $('servo').value);
+$('led').oninput = () => { $('ledVal').textContent = $('led').value; ledSend($('led').value); };
+$('led').onchange = () => send('led ' + $('led').value);
+document.querySelectorAll('[data-servo]').forEach(b => b.onclick = () => { $('servo').value = b.dataset.servo; $('servoVal').textContent = b.dataset.servo; action('servo ' + b.dataset.servo); });
+document.querySelectorAll('[data-led]').forEach(b => b.onclick = () => { $('led').value = b.dataset.led; $('ledVal').textContent = b.dataset.led; action('led ' + b.dataset.led); });
+$('btnServoOff').onclick = () => action('servo off');
+$('btnLedFade').onclick = () => action('led ' + $('led').value + ' 2000');
+
+$('btnConnect').onclick = connect;
+$('btnDisconnect').onclick = disconnect;
+document.querySelectorAll('[data-jog]').forEach(b => b.onclick = () => action('st jog ' + b.dataset.jog));
+document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { $('slider').value = b.dataset.go; $('sliderVal').textContent = b.dataset.go; action('st go ' + b.dataset.go); });
+$('slider').oninput = () => { $('sliderVal').textContent = $('slider').value; };
+$('btnGo').onclick = () => action('st go ' + $('slider').value);
+$('btnTorqueOn').onclick = () => action('st torque on');
+$('btnTorqueOff').onclick = () => action('st torque off');
+$('btnPos').onclick = () => action('st pos');
+$('btnSend').onclick = () => { const c = $('cmd').value.trim(); if (c) { action(c); $('cmd').value = ''; } };
+$('cmd').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnSend').click(); });
+
+if (!navigator.bluetooth) { $('support').hidden = false; $('btnConnect').disabled = true; }
+setConnected(false);
+</script>
+</body>
+</html>

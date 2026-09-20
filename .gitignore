@@ -1,0 +1,13 @@
+# PlatformIO / Arduino build outputs
+firmware/**/.pio/
+firmware/**/build/
+firmware/**/.vscode/
+*.bin
+*.elf
+*.map
+# Python
+__pycache__/
+*.pyc
+# OS / editor
+.DS_Store
+Thumbs.db
