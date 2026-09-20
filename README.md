@@ -2,6 +2,10 @@
 
 **目标**：用微雪 ESP32-S3-DEV-KIT-N8R8 替代原来的 RV1126B 主板，通过串口控制 FZYT-28 云台电机。
 
+- **代码仓库**：https://github.com/CodingMcnugget/920demo
+- **在线控制页面**（GitHub Pages，HTTPS，Chrome/Edge 打开后蓝牙连接电机）：**https://codingmcnugget.github.io/920demo/webapp/**
+  推送 `main` 分支后 GitHub Pages 自动重新发布，约 1 分钟生效。
+
 ## 当前状态（2026-09-18）
 
 | 项 | 状态 |
@@ -34,6 +38,7 @@
 │   ├── 02-资料与出处.md                     官方链接、原理图要点、规格书摘要、协议实测结果
 │   ├── 03-烧录与控制步骤.md                  烧录、st 命令控制电机、联调工具、向厂家要什么
 │   └── ESP32-S3-DEV-KIT-N8R8-schematic.pdf  微雪官方原理图
+├── index.html                             跳转到 webapp/（给 GitHub Pages 用）
 ├── webapp/
 │   └── index.html                         网页控制端：Chrome 打开，蓝牙连接 FZYT-28-xxxx
 └── firmware/
@@ -56,7 +61,7 @@
    st move 90       → 转到 90°（自动开扭矩）
    st torque off    → 关扭矩
    ```
-4. **网页控制**：Chrome 打开 `webapp/index.html` → 连接电机 → 选 `FZYT-28-xxxx`。
+4. **网页控制**：Chrome 打开 https://codingmcnugget.github.io/920demo/webapp/ （或本地 `webapp/index.html`）→ 连接电机 → 选 `FZYT-28-xxxx`。
 
 ## 接线速查
 
