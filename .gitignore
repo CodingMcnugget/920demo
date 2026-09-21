@@ -11,3 +11,6 @@ __pycache__/
 # OS / editor
 .DS_Store
 Thumbs.db
+# 厂商上位机（体积大、非本项目源码，不入库）
+swj_v9.exe
+*.exe
