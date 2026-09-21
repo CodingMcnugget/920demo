@@ -69,7 +69,7 @@
     <button id="btnConnect" class="primary">连接电机</button>
     <button id="btnDisconnect" disabled>断开</button>
   </div>
-  <div id="support" class="warn" hidden>这个浏览器不支持 Web Bluetooth。请用电脑或安卓上的 Chrome / Edge；iPhone 的 Safari 不支持。</div>
+  <div id="support" class="warn" hidden></div>
 </div>
 
 <div class="card">
@@ -87,6 +87,15 @@
   <div class="grid" style="grid-template-columns:1fr 1fr; margin-top:8px">
     <button id="holdL" class="hold">◀◀ 按住左转</button>
     <button id="holdR" class="hold">按住右转 ▶▶</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <span class="muted">连环巡航</span>
+    <input id="swA" type="number" value="-60" style="width:64px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text)">
+    <span class="muted">~</span>
+    <input id="swB" type="number" value="60" style="width:64px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text)">
+    <span class="muted">°</span>
+    <span style="flex:1"></span>
+    <button id="btnSweep" class="hold">⟳ 开始巡航</button>
   </div>
 </div>
 
@@ -109,12 +118,12 @@
     <span class="muted">转到绝对角度</span>
     <span><b id="sliderVal">0</b>°</span>
   </div>
-  <input id="slider" type="range" min="0" max="359" value="0" step="1">
+  <input id="slider" type="range" min="-180" max="180" value="0" step="1">
   <div class="row" style="margin-top:8px">
+    <button data-go="-90">-90°</button>
     <button data-go="0">0°</button>
     <button data-go="90">90°</button>
     <button data-go="180">180°</button>
-    <button data-go="270">270°</button>
     <span style="flex:1"></span>
     <button id="btnGo" class="primary">转到</button>
   </div>
@@ -132,16 +141,55 @@
 
 <div class="card">
   <div class="row" style="justify-content:space-between">
+    <span class="muted">归零 · 头（电机）</span>
+    <span class="muted">原始 <b id="rawCounts">--</b> 计数</span>
+  </div>
+  <div class="muted" style="margin:6px 0">用上面的左右/点动把头转到你要当作 0° 的位置，再点"设为零点"（存在 ESP32 里，掉电不丢，不写电机）</div>
+  <div class="row">
+    <button id="btnSetHome" class="primary">设当前为零点</button>
+    <button id="btnGoHome">回零点 (0°)</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between">
     <span class="muted">舵机（GPIO4）</span>
-    <span><b id="servoVal">90</b>°</span>
+    <span><b id="servoVal">90</b>° · Home <b id="servoHomeVal">90</b>°</span>
   </div>
   <input id="servo" type="range" min="0" max="180" value="90" step="1">
+  <div class="grid" style="margin-top:8px">
+    <button data-sjog="-15">◀ 15°</button>
+    <button data-sjog="-5">◀ 5°</button>
+    <button data-sjog="5">5° ▶</button>
+    <button data-sjog="15">15° ▶</button>
+  </div>
   <div class="row" style="margin-top:8px">
     <button data-servo="0">0°</button>
     <button data-servo="90">90°</button>
     <button data-servo="180">180°</button>
     <span style="flex:1"></span>
+    <button id="btnServoHome">设Home</button>
+    <button id="btnServoGoHome">回Home</button>
     <button id="btnServoOff">松开</button>
+  </div>
+  <div class="row" style="margin-top:8px; border-top:1px solid var(--line); padding-top:8px">
+    <span class="muted">标定 脉宽</span>
+    <button data-sus="-40">−</button>
+    <button data-sus="40">＋</button>
+    <span class="muted"><b id="servoUs">--</b>µs</span>
+    <span style="flex:1"></span>
+    <button id="btnSetOpen">设全开(0°)</button>
+    <button id="btnSetClosed">设全关(180°)</button>
+  </div>
+  <div class="muted" style="margin-top:4px">标定：用 −/＋ 把镜头调到"全开"→设全开；调到"全关"→设全关。之后 0°=全开 180°=全关 90°=半开</div>
+  <div class="row" style="margin-top:8px">
+    <span class="muted">连环巡航</span>
+    <input id="ssA" type="number" value="60" style="width:64px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text)">
+    <span class="muted">~</span>
+    <input id="ssB" type="number" value="120" style="width:64px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text)">
+    <span class="muted">°</span>
+    <span style="flex:1"></span>
+    <button id="btnServoSweep">⟳ 巡航</button>
   </div>
 </div>
 
@@ -158,6 +206,7 @@
     <button data-led="100">全亮</button>
     <span style="flex:1"></span>
     <button id="btnLedFade">2 秒渐变</button>
+    <button id="btnBreathe">♨ 呼吸</button>
   </div>
 </div>
 
@@ -186,12 +235,26 @@ function log(line, dir) {
   el.scrollTop = el.scrollHeight;
 }
 
+// 判断 Web 蓝牙是否可用，不可用时给出针对性原因（HTTPS / iOS / 浏览器不支持）
+function bluetoothStatus() {
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (window.isSecureContext === false)
+    return { ok: false, msg: '⚠ 必须用 HTTPS 打开才能连蓝牙。手机请用在线地址：https://codingmcnugget.github.io/920demo/webapp/ （file:// 或普通 http 会被浏览器禁用蓝牙）。' };
+  if (!navigator.bluetooth) {
+    if (isIOS)
+      return { ok: false, msg: '⚠ iOS 的 Safari 和 Chrome 都不支持 Web 蓝牙。请在 App Store 装「Bluefy」浏览器打开本页，或改用安卓手机 / 电脑的 Chrome、Edge。' };
+    return { ok: false, msg: '⚠ 此浏览器不支持 Web 蓝牙。请用安卓 Chrome/Edge，或电脑 Chrome/Edge。' };
+  }
+  return { ok: true, msg: '' };
+}
+
 function setConnected(on, name) {
   $('dot').classList.toggle('on', on);
   $('state').textContent = on ? `已连接 ${name}` : '未连接';
   $('btnConnect').disabled = on;
   $('btnDisconnect').disabled = !on;
-  document.querySelectorAll('[data-jog],[data-go],[data-servo],[data-led],#btnGo,#btnTorqueOn,#btnTorqueOff,#btnPos,#btnSend,#btnServoOff,#btnLedFade,.hold')
+  document.querySelectorAll('[data-jog],[data-go],[data-servo],[data-led],[data-sjog],#btnGo,#btnTorqueOn,#btnTorqueOff,#btnPos,#btnSend,#btnServoOff,#btnLedFade,#btnSetHome,#btnGoHome,#btnServoHome,#btnServoGoHome,#btnSweep,#btnBreathe,#btnServoSweep,#btnSetOpen,#btnSetClosed,[data-sus],.hold')
     .forEach(b => b.disabled = !on);
   if (!on) { $('deg').textContent = '--'; $('counts').textContent = '--'; $('torque').textContent = '--'; }
 }
@@ -202,12 +265,16 @@ function onNotify(ev) {
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     log(line.trim(), '←');
-    const m = line.match(/当前位置 = (\d+) 计数 = ([\d.]+)°/);
-    if (m) { $('counts').textContent = m[1]; $('deg').textContent = m[2]; }
+    const m = line.match(/当前位置 = (\d+) 计数 = (-?[\d.]+)°/);
+    if (m) { $('counts').textContent = m[1]; $('deg').textContent = m[2]; $('rawCounts').textContent = m[1]; }
     const t = line.match(/扭矩 = (开|关)/);
     if (t) $('torque').textContent = t[1];
-    const g = line.match(/^OK (go|jog) -> ([\d.]+)°/);
+    const g = line.match(/^OK (go|jog) -> (-?[\d.]+)°/);
     if (g) $('torque').textContent = '开';
+    const su = line.match(/\((\d+) µs\)/);          // 舵机 -> X° (Y µs)
+    if (su) { servoCurUs = parseInt(su[1]); $('servoUs').textContent = su[1]; }
+    const sc = line.match(/当前=(\d+)µs/);           // servo cal
+    if (sc) { servoCurUs = parseInt(sc[1]); $('servoUs').textContent = sc[1]; }
   }
 }
 
@@ -222,7 +289,7 @@ async function send(cmd) {
 }
 
 async function connect() {
-  if (!navigator.bluetooth) { $('support').hidden = false; return; }
+  { const bt = bluetoothStatus(); if (!bt.ok) { $('support').textContent = bt.msg; $('support').hidden = false; log(bt.msg, '!'); return; } }
   try {
     device = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
     device.addEventListener('gattserverdisconnected', () => { stopPoll(); setConnected(false); log('连接断开', '!'); });
@@ -235,6 +302,7 @@ async function connect() {
     setConnected(true, device.name || '');
     log('已连接 ' + device.name, '!');
     await send('st pos');
+    await send('servo cal');
     startPoll();
   } catch (e) {
     log('连接失败: ' + e.message, '!');
@@ -251,20 +319,21 @@ function disconnect() {
 // 每 700ms 读一次位置。发命令时略过一轮，避免和按钮命令挤在一起
 function startPoll() {
   stopPoll();
-  pollTimer = setInterval(() => { if (!busy && $('pollOn').checked) send('st pos'); }, 700);
+  pollTimer = setInterval(() => { if (!busy && !sweeping && $('pollOn').checked) send('st pos'); }, 700);
 }
 function stopPoll() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
 
 async function action(cmd) {
   busy = true;
   await send(cmd);
-  setTimeout(() => { busy = false; }, 300);
+  setTimeout(() => { busy = false; }, 150);
 }
 
 // 按住持续转动：按下每 300ms 发一次 st run（固件 700ms 没收到就自动停），松开发 st stop
 let holdTimer = null;
 function holdStart(btn, sign) {
   if (!rxChar || holdTimer) return;
+  stopSweepUI();
   btn.classList.add('active');
   busy = true;                                   // 按住期间暂停位置轮询，让总线只跑 run
   const tick = () => send('st run ' + (sign * parseInt($('speed').value)));
@@ -299,28 +368,71 @@ function throttled(fn, ms) {
 }
 const servoSend = throttled(v => send('servo ' + v), 120);
 const ledSend = throttled(v => send('led ' + v), 120);
-$('servo').oninput = () => { $('servoVal').textContent = $('servo').value; servoSend($('servo').value); };
+$('servo').oninput = () => { stopServoSweepUI(); $('servoVal').textContent = $('servo').value; servoSend($('servo').value); };
 $('servo').onchange = () => send('servo ' + $('servo').value);
-$('led').oninput = () => { $('ledVal').textContent = $('led').value; ledSend($('led').value); };
+$('led').oninput = () => { stopBreatheUI(); $('ledVal').textContent = $('led').value; ledSend($('led').value); };
 $('led').onchange = () => send('led ' + $('led').value);
-document.querySelectorAll('[data-servo]').forEach(b => b.onclick = () => { $('servo').value = b.dataset.servo; $('servoVal').textContent = b.dataset.servo; action('servo ' + b.dataset.servo); });
-document.querySelectorAll('[data-led]').forEach(b => b.onclick = () => { $('led').value = b.dataset.led; $('ledVal').textContent = b.dataset.led; action('led ' + b.dataset.led); });
-$('btnServoOff').onclick = () => action('servo off');
-$('btnLedFade').onclick = () => action('led ' + $('led').value + ' 2000');
+document.querySelectorAll('[data-servo]').forEach(b => b.onclick = () => { stopServoSweepUI(); $('servo').value = b.dataset.servo; $('servoVal').textContent = b.dataset.servo; action('servo ' + b.dataset.servo); });
+document.querySelectorAll('[data-led]').forEach(b => b.onclick = () => { stopBreatheUI(); $('led').value = b.dataset.led; $('ledVal').textContent = b.dataset.led; action('led ' + b.dataset.led); });
+$('btnServoOff').onclick = () => { stopServoSweepUI(); action('servo off'); };
+$('btnLedFade').onclick = () => { stopBreatheUI(); action('led ' + $('led').value + ' 2000'); };
+
+// ---- 软件归零：任意位置设为 home（存 ESP32 NVS，不写电机 EEPROM）----
+$('btnSetHome').onclick = () => { stopSweepUI(); action('st home'); };
+$('btnGoHome').onclick = () => { stopSweepUI(); action('st go 0'); };
+
+// ---- 特效：连环巡航 / 呼吸灯（固件自主跑，软件只发一次开始/停止，蓝牙延迟不影响流畅度）----
+let sweeping = false, breathing = false, servoSweeping = false;
+function setSweepUI(on) { sweeping = on; $('btnSweep').classList.toggle('active', on); $('btnSweep').textContent = on ? '■ 停止巡航' : '⟳ 开始巡航'; }
+function stopSweepUI() { if (sweeping) setSweepUI(false); }   // 手动运动时只更新界面（固件已自动停巡航）
+$('btnSweep').onclick = () => {
+  if (sweeping) { setSweepUI(false); action('st stop'); }
+  else { setSweepUI(true); action('st sweep ' + $('swA').value + ' ' + $('swB').value + ' ' + $('speed').value); }
+};
+function setBreatheUI(on) { breathing = on; $('btnBreathe').classList.toggle('active', on); $('btnBreathe').textContent = on ? '■ 停呼吸' : '♨ 呼吸'; }
+function stopBreatheUI() { if (breathing) setBreatheUI(false); }
+$('btnBreathe').onclick = () => {
+  if (breathing) { setBreatheUI(false); action('led off'); $('led').value = 0; $('ledVal').textContent = 0; }
+  else { setBreatheUI(true); action('led breathe 3000 0 100'); }
+};
+function setServoSweepUI(on) { servoSweeping = on; $('btnServoSweep').classList.toggle('active', on); $('btnServoSweep').textContent = on ? '■ 停' : '⟳ 巡航'; }
+function stopServoSweepUI() { if (servoSweeping) setServoSweepUI(false); }
+$('btnServoSweep').onclick = () => {
+  if (servoSweeping) { setServoSweepUI(false); action('servo off'); }
+  else { setServoSweepUI(true); action('servo sweep ' + $('ssA').value + ' ' + $('ssB').value); }
+};
+
+// ---- 舵机开合标定：用脉宽微调找到全开/全关物理端点，再标定 ----
+let servoCurUs = 1500;
+document.querySelectorAll('[data-sus]').forEach(b => b.onclick = () => {
+  stopServoSweepUI();
+  servoCurUs = Math.max(500, Math.min(2500, servoCurUs + parseInt(b.dataset.sus, 10)));
+  action('servo us ' + servoCurUs);
+});
+$('btnSetOpen').onclick = () => { action('servo setopen'); setTimeout(() => send('servo cal'), 200); };
+$('btnSetClosed').onclick = () => { action('servo setclosed'); setTimeout(() => send('servo cal'), 200); };
+
+// ---- 舵机点动 / Home（开环，Home 存在浏览器本地）----
+let servoHome = parseInt(localStorage.getItem('servoHome') || '90', 10);
+$('servoHomeVal').textContent = servoHome;
+function setServo(v) { stopServoSweepUI(); v = Math.max(0, Math.min(180, Math.round(v))); $('servo').value = v; $('servoVal').textContent = v; action('servo ' + v); }
+document.querySelectorAll('[data-sjog]').forEach(b => b.onclick = () => setServo(parseInt($('servo').value, 10) + parseInt(b.dataset.sjog, 10)));
+$('btnServoHome').onclick = () => { servoHome = parseInt($('servo').value, 10); localStorage.setItem('servoHome', servoHome); $('servoHomeVal').textContent = servoHome; log('舵机 Home 设为 ' + servoHome + '°', '!'); };
+$('btnServoGoHome').onclick = () => setServo(servoHome);
 
 $('btnConnect').onclick = connect;
 $('btnDisconnect').onclick = disconnect;
-document.querySelectorAll('[data-jog]').forEach(b => b.onclick = () => action('st jog ' + b.dataset.jog));
-document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { $('slider').value = b.dataset.go; $('sliderVal').textContent = b.dataset.go; action('st go ' + b.dataset.go); });
+document.querySelectorAll('[data-jog]').forEach(b => b.onclick = () => { stopSweepUI(); action('st jog ' + b.dataset.jog); });
+document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { stopSweepUI(); $('slider').value = b.dataset.go; $('sliderVal').textContent = b.dataset.go; action('st go ' + b.dataset.go); });
 $('slider').oninput = () => { $('sliderVal').textContent = $('slider').value; };
-$('btnGo').onclick = () => action('st go ' + $('slider').value);
+$('btnGo').onclick = () => { stopSweepUI(); action('st go ' + $('slider').value); };
 $('btnTorqueOn').onclick = () => action('st torque on');
 $('btnTorqueOff').onclick = () => action('st torque off');
 $('btnPos').onclick = () => action('st pos');
 $('btnSend').onclick = () => { const c = $('cmd').value.trim(); if (c) { action(c); $('cmd').value = ''; } };
 $('cmd').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnSend').click(); });
 
-if (!navigator.bluetooth) { $('support').hidden = false; $('btnConnect').disabled = true; }
+{ const bt = bluetoothStatus(); if (!bt.ok) { $('support').textContent = bt.msg; $('support').hidden = false; $('btnConnect').disabled = true; } }
 setConnected(false);
 </script>
 </body>
