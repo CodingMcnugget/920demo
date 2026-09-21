@@ -57,6 +57,18 @@ static uint32_t g_waitMs = 200;       // tx 命令发完后等待回应的时间
 static bool     g_monitor = true;     // 空闲时是否打印电机主动发来的数据
 static bool     g_bridge = false;
 
+// 当前默认操作的电机 ID。开机时 detectMotorId() 自动探测（不同批次电机出厂 ID 可能
+// 是 1 或 2，甚至被改过），命令省略 [id] 时就用这个。默认先用出厂值 2 兜底。
+static uint8_t  g_motorId = scs::DEFAULT_ID;
+
+// 软件零点：home 处的原始计数，存在 ESP32 的 NVS 里（蓝牙一条命令即可设，不写电机 EEPROM，
+// 掉电不丢）。所有角度都相对它显示/下发（左负右正）。
+// g_target 是当前命令目标(原始计数)，点动在它上面累加、不必每次先读当前位置——连点也能连续
+// 平滑地跟（这是"丝滑"的关键）。g_targetSynced=false 表示还没和电机实际位置对齐过。
+static int32_t g_zeroOffset = 0;
+static long    g_target = 0;
+static bool    g_targetSynced = false;
+
 // 由 UART 事件任务（另一个 FreeRTOS 任务）累加，主循环读取
 static std::atomic<uint32_t> g_frameErr{0};
 static std::atomic<uint32_t> g_breakErr{0};
@@ -375,7 +387,7 @@ static bool parseHex(const String &s, uint8_t *dst, size_t cap, size_t &n) {
 static void cmdHelp() {
     out.println();
     out.println("FZYT-28 云台控制固件 —— 命令列表");
-    out.println("电机控制（飞特 SCS 协议，1 Mbps，出厂 ID=2；[id] 省略时用 2）：");
+    out.printf ("电机控制（飞特 SCS 协议，1 Mbps；[id] 省略时用开机自动识别的 ID=%u）：\n", g_motorId);
     out.println("  st ping [id]                 探测电机");
     out.println("  st scan                      在当前波特率下扫描 ID 0~253，找出所有在线电机");
     out.println("  st pos [id]                  读当前位置（计数和角度）");
@@ -384,15 +396,21 @@ static void cmdHelp() {
     out.println("  st go <角度> [id]            转到绝对角度，只回一行结果（网页按钮用）");
     out.println("  st jog <±角度> [id]          相对当前位置转动，例: st jog -15");
     out.println("  st run <±度/秒> [id]         持续转动（每 <700ms 重发一次当心跳，到边界自动停）");
-    out.println("  st stop                      停止持续转动");
+    out.println("  st stop                      停止持续转动/巡航");
+    out.println("  st sweep <角A> <角B> [°/s]   头部连环左右巡航（固件自主跑，无需心跳；st sweep off 停）");
     out.println("  st hold on|off               上电保持：ESP32 开机就锁住电机，扭矩掉了自动补（存 NVS，默认开）");
     out.println("  st read <addr> <n> [id]      读寄存器，例: st read 0x38 2");
     out.println("  st write <addr> <hex..> [id=N] [force]  写寄存器（16 位大端），例: st write 0x2A 07 24");
-    out.println("  st zero confirm [id]         把当前位置记为零位（写 EEPROM 0x16，慎用）");
+    out.println("  st home [id]                 软件归零：当前位置设为 home（存 ESP32 NVS，掉电不丢，不写电机）");
+    out.println("  st zero confirm [id]         把当前位置记为零位（写电机 EEPROM 0x16，一般用 st home 就够）");
     out.printf ("舵机（GPIO%d，50Hz）与灯（GPIO%d，PWM 调光）：\n", SERVO_PIN, LED_PWM_PIN);
-    out.println("  servo <0~180> [ms]           舵机转到角度，可指定用时；默认按 servo speed 限速（300°/s）");
-    out.println("  servo us <500~2500> [ms]     直接给脉宽；servo off 松开；servo speed <°/s> 改默认限速");
+    out.println("  servo <0~180> [ms]           转到角度：0=全开 180=全关 90=半开（按标定端点映射）");
+    out.println("  servo us <500~2500> [ms]     直接给脉宽（MG90S 标准范围）");
+    out.println("  servo setopen / setclosed    把当前脉宽标定为 全开(0°) / 全关(180°)（存 NVS，掉电不丢）");
+    out.println("  servo cal                    显示当前开合标定；servo off 松开；servo speed <°/s> 改限速");
+    out.println("  servo sweep <角A> <角B> [°/s] 舵机连环来回巡航（固件自主跑；servo sweep off 停）");
     out.println("  led <0~100> [渐变ms]         灯亮度百分比，可选渐变时间；led on / led off");
+    out.println("  led breathe [周期ms] [最小%] [最大%]  呼吸灯（固件自主跑；led off 停）");
     out.println("旧云台控制板协议（115200，电机本身不认，仅供参考）：");
     out.println("  ptz <cmd>            on off up down left right stop stopv stoph reset aion aioff privon privoff");
     out.println("  jog <方向> <ms>      朝 up/down/left/right 转 ms 毫秒后自动停止");
@@ -443,8 +461,8 @@ static void cmdDump(bool clear) {
 }
 
 static void cmdStatus() {
-    out.printf("电机串口: UART1  TX=GPIO%d  RX=GPIO%d  %lu 8N1\n",
-               MOTOR_TX_PIN, MOTOR_RX_PIN, (unsigned long)g_baud);
+    out.printf("电机串口: UART1  TX=GPIO%d  RX=GPIO%d  %lu 8N1  当前默认电机 ID=%u\n",
+               MOTOR_TX_PIN, MOTOR_RX_PIN, (unsigned long)g_baud, g_motorId);
     out.printf("BLE: %s，%s\n", g_bleName.c_str(), g_bleConnected ? "已连接" : "未连接（广播中）");
     out.printf("累计收到: %lu 字节\n", (unsigned long)g_rxTotal);
     out.printf("错误计数: frame=%lu  break=%lu  other=%lu\n",
@@ -701,16 +719,25 @@ static bool scsWrite16(uint8_t id, uint8_t addr, uint16_t v, bool verbose, bool 
 // ---------------------------------------------------------------------------
 static float    g_runDps = 0;        // 度/秒，0 = 不在转
 static float    g_runGoal = 0;       // 当前推进中的目标（计数，浮点累加）
-static uint8_t  g_runId = scs::DEFAULT_ID;
+static uint8_t  g_runId = g_motorId;
 static uint32_t g_runLastCmdMs = 0;  // 最近一次 st run 的时间（心跳）
 static uint32_t g_runLastStepMs = 0;
+
+// 头部巡航（连环左右旋转）：固件本地在两个角度间来回平滑推进，软件只发一次开始/停止，
+// 不需要心跳、不用每帧发命令。停止用 st sweep off 或 st stop。
+static bool     g_sweepOn = false;
+static long     g_sweepLo = 0, g_sweepHi = 0;   // 原始计数，两端点
+static float    g_sweepDps = 60;
+static int      g_sweepDir = 1;
+static uint32_t g_sweepLastMs = 0;
 
 static void runStop(const char *why) {
     if (g_runDps == 0) return;
     g_runDps = 0;
     uint16_t p = 0;
     scsReadU16(g_runId, scs::REG_PRESENT_POSITION, p);
-    out.printf("STOP (%s) at %.1f° (%u)\n", why, scs::countsToDeg(p), p);
+    g_target = p; g_targetSynced = true;   // 停下后把点动目标对齐到实际停的位置
+    out.printf("STOP (%s) at %.1f° (%u)\n", why, rawToUserDeg(p), p);
 }
 
 static void runStart(uint8_t id, float dps) {
@@ -747,22 +774,23 @@ static bool holdArm(uint8_t id, bool verbose) {
     uint16_t cur = 0;
     if (!scsReadU16(id, scs::REG_PRESENT_POSITION, cur)) return false;
     scsWrite16(id, scs::REG_GOAL_POSITION, cur, false);   // 先把目标对齐当前位置，开扭矩时不会跳
+    g_target = cur; g_targetSynced = true;
     uint8_t one = 1;
     scsWrite(id, scs::REG_TORQUE_ENABLE, &one, 1, false);
     uint8_t te = 0;
     bool ok = scsReadU8(id, scs::REG_TORQUE_ENABLE, te) && te == 1;
-    if (verbose) out.printf("保持: ID %u 锁定在 %.1f° (%u) %s\n", id, scs::countsToDeg(cur), cur, ok ? "OK" : "失败");
+    if (verbose) out.printf("保持: ID %u 锁定在 %.1f° (%u) %s\n", id, rawToUserDeg(cur), cur, ok ? "OK" : "失败");
     return ok;
 }
 
 static void holdService() {
-    if (!g_holdMode || g_holdSuspended || g_runDps != 0) return;
+    if (!g_holdMode || g_holdSuspended || g_runDps != 0 || g_sweepOn) return;
     uint32_t now = millis();
     if (now - g_holdLastCheckMs < 2000) return;
     g_holdLastCheckMs = now;
     uint8_t te = 0;
-    if (!scsReadU8(scs::DEFAULT_ID, scs::REG_TORQUE_ENABLE, te)) return;  // 电机不在线，下次再试
-    if (!te) holdArm(scs::DEFAULT_ID, true);
+    if (!scsReadU8(g_motorId, scs::REG_TORQUE_ENABLE, te)) return;  // 电机不在线，下次再试
+    if (!te) holdArm(g_motorId, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -790,17 +818,28 @@ static float    g_servoSpeedDps = 300;  // 默认限速 300°/s（180° 用 0.6s
 static float    g_servoMoveUsPerMs = 0; // 本次移动的速度
 static uint32_t g_servoLastMs = 0;
 
+// 舵机巡航（连环来回）：固件本地在两端点间自主往返，软件只发一次开始/停止
+static bool g_servoSweepOn = false;
+static int  g_servoSweepAUs = 0, g_servoSweepBUs = 0;
+
+// 舵机开合标定：0°(全开)/180°(全关) 对应的实际脉宽，存 NVS。角度按这两点线性映射，
+// 于是 0°=全开、180°=全关、90°=正好半开。默认用 board_config 的 500/2500。
+static int  g_servoOpenUs = SERVO_MIN_US;
+static int  g_servoClosedUs = SERVO_MAX_US;
+
+// 角度 <-> 脉宽：按标定的全开(0°)/全关(180°)端点线性映射
 static float servoUsToDeg(int us) {
-    return (us - SERVO_MIN_US) * (float)SERVO_MAX_DEG / (SERVO_MAX_US - SERVO_MIN_US);
+    if (g_servoClosedUs == g_servoOpenUs) return 0;
+    return (us - g_servoOpenUs) * (float)SERVO_MAX_DEG / (g_servoClosedUs - g_servoOpenUs);
 }
 static int servoDegToUs(float deg) {
-    deg = constrain(deg, 0.0f, (float)SERVO_MAX_DEG);
-    return SERVO_MIN_US + (int)(deg * (SERVO_MAX_US - SERVO_MIN_US) / SERVO_MAX_DEG + 0.5f);
+    deg = constrain(deg, 0.0f, (float)SERVO_MAX_DEG);   // MG90S 只有 0~180°
+    return g_servoOpenUs + (int)roundf(deg * (g_servoClosedUs - g_servoOpenUs) / SERVO_MAX_DEG);
 }
 
 // 直接输出脉宽（不限速）
 static void servoOutputUs(int us) {
-    us = constrain(us, SERVO_MIN_US, SERVO_MAX_US);
+    us = constrain(us, SERVO_EXPLORE_MIN_US, SERVO_EXPLORE_MAX_US);
     if (!g_servoAttached) { pwmAttach(SERVO_PIN, SERVO_CH, SERVO_FREQ, SERVO_BITS); g_servoAttached = true; }
     uint32_t duty = (uint32_t)((uint64_t)us * ((1UL << SERVO_BITS) - 1) / 20000UL);
     pwmWrite(SERVO_PIN, SERVO_CH, duty);
@@ -811,7 +850,7 @@ static void servoOutputUs(int us) {
 // 限速移动：一步跳到位时舵机堵转电流最大（接在板子 5V 脚上会把 USB 拉掉），
 // 改成每 20ms 推进一点。durationMs=0 时按 g_servoSpeedDps 算时间
 static void servoMoveUs(int targetUs, uint32_t durationMs) {
-    targetUs = constrain(targetUs, SERVO_MIN_US, SERVO_MAX_US);
+    targetUs = constrain(targetUs, SERVO_EXPLORE_MIN_US, SERVO_EXPLORE_MAX_US);
     if (!g_servoAttached) {            // 刚上电不知道舵机在哪，第一次直接输出
         servoOutputUs(targetUs);
         g_servoTargetUs = targetUs;
@@ -827,6 +866,10 @@ static void servoMoveUs(int targetUs, uint32_t durationMs) {
 }
 
 static void servoService() {
+    // 巡航：到端点(不再移动)后自动翻转到另一端
+    if (g_servoSweepOn && g_servoAttached && g_servoMoveUsPerMs == 0) {
+        servoMoveUs(g_servoTargetUs == g_servoSweepAUs ? g_servoSweepBUs : g_servoSweepAUs, 0);
+    }
     if (g_servoMoveUsPerMs == 0 || !g_servoAttached) return;
     uint32_t now = millis();
     if (now - g_servoLastMs < 20) return;
@@ -841,6 +884,7 @@ static void servoService() {
 
 // 舵机停止输出脉冲：普通舵机会松开（能用手拧）；数字舵机可能保持位置
 static void servoRelease() {
+    g_servoSweepOn = false;
     g_servoMoveUsPerMs = 0;
     if (!g_servoAttached) return;
     pwmDetach(SERVO_PIN, SERVO_CH);
@@ -853,6 +897,12 @@ static float    g_ledPct = 0;        // 当前亮度 0~100
 static float    g_ledTarget = 0;     // 渐变目标
 static float    g_ledStepPerMs = 0;  // 渐变速度
 static uint32_t g_ledLastMs = 0;
+
+// 呼吸特效：固件本地按帧生成正弦亮度，软件只发一次开始/停止，不用每帧发命令
+static bool     g_ledBreathe = false;
+static uint32_t g_ledBrPeriod = 3000;   // 一个完整呼吸周期(ms)
+static float    g_ledBrMin = 0, g_ledBrMax = 100;
+static uint32_t g_ledBrT0 = 0, g_ledBrLast = 0;
 
 // 人眼亮度感知是对数的，做一个 gamma 2.2，这样 50% 看起来才是一半亮
 static void ledApply(float pct) {
@@ -874,6 +924,15 @@ static void ledSet(float pct, uint32_t fadeMs) {
 }
 
 static void ledService() {
+    if (g_ledBreathe) {
+        uint32_t now = millis();
+        if (now - g_ledBrLast < 16) return;   // ~60fps 足够顺
+        g_ledBrLast = now;
+        float ph = ((now - g_ledBrT0) % g_ledBrPeriod) / (float)g_ledBrPeriod;  // 0~1
+        float k = 0.5f - 0.5f * cosf(6.2831853f * ph);                          // 平滑 0~1
+        ledApply(g_ledBrMin + (g_ledBrMax - g_ledBrMin) * k);
+        return;
+    }
     if (g_ledStepPerMs == 0 || g_ledPct == g_ledTarget) return;
     uint32_t now = millis();
     float step = g_ledStepPerMs * (now - g_ledLastMs);
@@ -899,6 +958,36 @@ static void cmdServo(const String &args) {
         out.printf("舵机默认限速 = %.0f°/s\n", g_servoSpeedDps);
         return;
     }
+    // 开合端点标定：转到物理全开位置后 servo setopen，转到全关后 servo setclosed
+    if (sub == "setopen") {
+        if (!g_servoAttached) { out.println("先用 servo us <脉宽> 或 servo <角度> 把舵机转到全开位置，再 setopen"); return; }
+        g_servoOpenUs = g_servoTargetUs; g_prefs.putInt("svo", g_servoOpenUs);   // 用目标脉宽,避免限速途中没到位
+        out.printf("OK 已标定 全开(0°) = %d µs\n", g_servoOpenUs);
+        return;
+    }
+    if (sub == "setclosed") {
+        if (!g_servoAttached) { out.println("先把舵机转到全关位置，再 setclosed"); return; }
+        g_servoClosedUs = g_servoTargetUs; g_prefs.putInt("svc", g_servoClosedUs);
+        out.printf("OK 已标定 全关(180°) = %d µs\n", g_servoClosedUs);
+        return;
+    }
+    if (sub == "cal") {
+        out.printf("舵机标定: 全开0°=%dµs 全关180°=%dµs 当前=%dµs(%.0f°)\n",
+                   g_servoOpenUs, g_servoClosedUs, g_servoUs, servoUsToDeg(g_servoUs));
+        return;
+    }
+    if (sub == "sweep") {
+        if (n >= 2 && (tok[1] == "off" || tok[1] == "0")) { g_servoSweepOn = false; out.println("舵机巡航停止"); return; }
+        if (n < 3) { out.println("用法: servo sweep <角A> <角B> [°/s]（连环来回，servo sweep off 停）"); return; }
+        g_servoSweepAUs = servoDegToUs(tok[1].toFloat());
+        g_servoSweepBUs = servoDegToUs(tok[2].toFloat());
+        if (n > 3) g_servoSpeedDps = constrain(tok[3].toFloat(), 10.0f, 3000.0f);
+        g_servoSweepOn = true;
+        servoMoveUs(g_servoSweepAUs, 0);
+        out.printf("舵机巡航: %.0f° <-> %.0f° @ %.0f°/s（servo sweep off 停）\n", tok[1].toFloat(), tok[2].toFloat(), g_servoSpeedDps);
+        return;
+    }
+    g_servoSweepOn = false;   // 任何手动舵机移动都先停巡航
     int targetUs;
     uint32_t ms;
     if (sub == "us") {
@@ -917,8 +1006,18 @@ static void cmdServo(const String &args) {
 static void cmdLed(const String &args) {
     String tok[4];
     int n = splitArgs(args, tok, 4);
-    if (!n) { out.printf("灯: %.0f%%（GPIO%d）。用法: led <0~100> [渐变ms] | led on | led off\n", g_ledPct, LED_PWM_PIN); return; }
+    if (!n) { out.printf("灯: %.0f%%（GPIO%d）。用法: led <0~100> [渐变ms] | led on | led off | led breathe [周期ms] [最小%%] [最大%%]\n", g_ledPct, LED_PWM_PIN); return; }
     String sub = tok[0]; sub.toLowerCase();
+    if (sub == "breathe") {
+        if (n >= 2 && (tok[1] == "off" || tok[1] == "0")) { g_ledBreathe = false; out.println("灯: 呼吸关"); return; }
+        g_ledBrPeriod = n >= 2 ? (uint32_t)max(200L, tok[1].toInt()) : 3000;
+        g_ledBrMin = n >= 3 ? constrain(tok[2].toFloat(), 0.0f, 100.0f) : 0;
+        g_ledBrMax = n >= 4 ? constrain(tok[3].toFloat(), 0.0f, 100.0f) : 100;
+        g_ledBreathe = true; g_ledBrT0 = millis(); g_ledBrLast = 0;
+        out.printf("灯: 呼吸中 周期%lums %.0f%%~%.0f%%（led off 停）\n", (unsigned long)g_ledBrPeriod, g_ledBrMin, g_ledBrMax);
+        return;
+    }
+    g_ledBreathe = false;   // 任何手动灯命令都先关呼吸
     float pct;
     if (sub == "on") pct = 100;
     else if (sub == "off") pct = 0;
@@ -945,6 +1044,20 @@ static void runService() {
     if (hitEdge) runStop("到达边界");
 }
 
+// 头部巡航：在 g_sweepLo~g_sweepHi 之间来回平滑推进目标，到端点自动反向。自主运行，无需心跳。
+static void sweepService() {
+    if (!g_sweepOn) return;
+    uint32_t now = millis();
+    if (now - g_sweepLastMs < 20) return;
+    float dt = (now - g_sweepLastMs) / 1000.0f;
+    g_sweepLastMs = now;
+    g_target += lroundf(g_sweepDir * g_sweepDps * dt * scs::COUNTS_PER_REV / 360.0f);
+    if (g_target >= g_sweepHi) { g_target = g_sweepHi; g_sweepDir = -1; }
+    if (g_target <= g_sweepLo) { g_target = g_sweepLo; g_sweepDir = 1; }
+    g_targetSynced = true;
+    scsWrite16(g_motorId, scs::REG_GOAL_POSITION, (uint16_t)clampCounts(g_target), false, false);
+}
+
 static bool scsReadU8(uint8_t id, uint8_t addr, uint8_t &v) {
     scs::Reply r;
     if (!scsRead(id, addr, 1, r, false)) return false;
@@ -957,6 +1070,49 @@ static bool scsReadU16(uint8_t id, uint8_t addr, uint16_t &v) {
     if (!scsRead(id, addr, 2, r, false)) return false;
     v = scs::be16(r.data);
     return true;
+}
+
+// 开机自动探测在线电机的 ID，写入 g_motorId。
+// 顺序：先 ping 出厂值 2、再 ping 1（最常见的两种出厂 ID），都没有再扫 0~253。
+// 探测不到就保留默认值，交给用户手动 st ping / st scan（可能是电机比 ESP32 晚上电）。
+static void detectMotorId() {
+    scs::Reply r;
+    const uint8_t prefer[] = { scs::DEFAULT_ID, 1 };
+    for (uint8_t id : prefer) {
+        if (scsTransact(id, scs::INST_PING, nullptr, 0, &r, true, false)) {
+            g_motorId = id;
+            out.printf("电机自动识别: ID %u\n", g_motorId);
+            return;
+        }
+    }
+    for (int id = 0; id <= 253; id++) {
+        if (scsTransact((uint8_t)id, scs::INST_PING, nullptr, 0, &r, true, false)) {
+            g_motorId = (uint8_t)id;
+            out.printf("电机自动识别: ID %u（扫描找到）\n", g_motorId);
+            return;
+        }
+    }
+    out.printf("未探测到电机，暂用默认 ID %u（可能电机还没上电，稍后可手动 st ping / st scan）\n", g_motorId);
+}
+
+// 确保速度环 D 已整定：出厂 0x24=4 阻尼过低，带配重会 ~4Hz 自激振荡（"晃头"）。
+// 厂家建议调 D，实测加到 24 消除振荡、到位准、保持稳。只在值不对时才写，避免每次开机写 EEPROM。
+// 换同款新电机（出厂同样 D=4）时开机会自动补上。
+static void ensureMotorTuning() {
+    uint8_t d = 0;
+    if (!scsReadU8(g_motorId, scs::REG_SPD_D, d)) {
+        out.println("整定: 电机无应答，跳过速度环 D 检查");
+        return;
+    }
+    if (d == scs::SPD_D_TUNED) {
+        out.printf("整定: 速度环 D(0x24) 已是 %u，无需修改\n", d);
+        return;
+    }
+    uint8_t v = scs::SPD_D_TUNED;
+    scsWrite(g_motorId, scs::REG_SPD_D, &v, 1, false);
+    uint8_t rb = 0;
+    bool ok = scsReadU8(g_motorId, scs::REG_SPD_D, rb) && rb == scs::SPD_D_TUNED;
+    out.printf("整定: 速度环 D(0x24) %u -> %u（消除自激振荡）%s\n", d, scs::SPD_D_TUNED, ok ? "OK" : "失败");
 }
 
 // 解析 "0x38" / "56" 这类数字
@@ -981,6 +1137,17 @@ static int splitArgs(const String &args, String *tok, int maxTok) {
     return n;
 }
 
+// 软件零点换算：原始计数 <-> 相对 home 的角度（带符号，左负右正）
+static float rawToUserDeg(long raw) { return (raw - g_zeroOffset) * 360.0f / scs::COUNTS_PER_REV; }
+static long  userDegToRaw(float deg) { return g_zeroOffset + lroundf(deg * scs::COUNTS_PER_REV / 360.0f); }
+// 只夹到原始编码器范围 0~4095（= 物理一圈），不是人为数字限位，只为避免越界取模造成反向乱转
+static long  clampCounts(long c) { if (c < 0) c = 0; if (c > scs::COUNTS_PER_REV - 1) c = scs::COUNTS_PER_REV - 1; return c; }
+// 把命令目标对齐到电机当前实际位置（开扭矩 / 保持 / 手动搬动后调用，避免下一次点动跳变）
+static void syncTarget(uint8_t id) {
+    uint16_t cur = 0;
+    if (scsReadU16(id, scs::REG_PRESENT_POSITION, cur)) { g_target = cur; g_targetSynced = true; }
+}
+
 static void cmdSt(const String &args) {
     String tok[12];
     int n = splitArgs(args, tok, 12);
@@ -992,7 +1159,7 @@ static void cmdSt(const String &args) {
     sub.toLowerCase();
 
     if (sub == "ping") {
-        uint8_t id = (uint8_t)parseNum(n > 1 ? tok[1] : "", scs::DEFAULT_ID);
+        uint8_t id = (uint8_t)parseNum(n > 1 ? tok[1] : "", g_motorId);
         scs::Reply r;
         if (scsTransact(id, scs::INST_PING, nullptr, 0, &r, true, true))
             out.printf("ID %u 在线，错误码 0x%02X\n", r.id, r.err);
@@ -1016,10 +1183,10 @@ static void cmdSt(const String &args) {
     }
 
     if (sub == "pos") {
-        uint8_t id = (uint8_t)parseNum(n > 1 ? tok[1] : "", scs::DEFAULT_ID);
+        uint8_t id = (uint8_t)parseNum(n > 1 ? tok[1] : "", g_motorId);
         uint16_t pos;
         if (scsReadU16(id, scs::REG_PRESENT_POSITION, pos))
-            out.printf("ID %u 当前位置 = %u 计数 = %.1f°\n", id, pos, scs::countsToDeg(pos));
+            out.printf("ID %u 当前位置 = %u 计数 = %.1f°\n", id, pos, rawToUserDeg(pos));
         else
             out.printf("ID %u 无应答\n", id);
         return;
@@ -1028,12 +1195,13 @@ static void cmdSt(const String &args) {
     if (sub == "torque") {
         if (n < 2) { out.println("用法: st torque on|off [id]"); return; }
         bool on = tok[1] == "on" || tok[1] == "1";
-        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", scs::DEFAULT_ID);
+        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", g_motorId);
+        g_sweepOn = false;
         runStop("torque");
         g_holdSuspended = !on;   // 手动关扭矩后，自动保持不再抢着打开
         if (on) {
             uint16_t cur = 0;    // 开扭矩前把目标对齐当前位置，否则会跳回上次的目标
-            if (scsReadU16(id, scs::REG_PRESENT_POSITION, cur)) scsWrite16(id, scs::REG_GOAL_POSITION, cur, false);
+            if (scsReadU16(id, scs::REG_PRESENT_POSITION, cur)) { scsWrite16(id, scs::REG_GOAL_POSITION, cur, false); g_target = cur; g_targetSynced = true; }
         }
         uint8_t v = on ? 1 : 0;
         scsWrite(id, scs::REG_TORQUE_ENABLE, &v, 1, true);
@@ -1046,9 +1214,10 @@ static void cmdSt(const String &args) {
     }
 
     if (sub == "move") {
-        if (n < 2) { out.println("用法: st move <角度 0~360> [id]"); return; }
+        if (n < 2) { out.println("用法: st move <角度> [id]"); return; }
+        g_sweepOn = false;
         float deg = tok[1].toFloat();
-        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", scs::DEFAULT_ID);
+        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", g_motorId);
         uint8_t te = 0;
         if (!scsReadU8(id, scs::REG_TORQUE_ENABLE, te)) {
             out.printf("ID %u 无应答\n", id);
@@ -1059,17 +1228,18 @@ static void cmdSt(const String &args) {
             scsWrite(id, scs::REG_TORQUE_ENABLE, &one, 1, false);
             out.println("扭矩已自动打开");
         }
-        uint16_t target = scs::degToCounts(deg);
+        uint16_t target = (uint16_t)clampCounts(userDegToRaw(deg));
         uint16_t before = 0;
         scsReadU16(id, scs::REG_PRESENT_POSITION, before);
         scsWrite16(id, scs::REG_GOAL_POSITION, target, true);
+        g_target = target; g_targetSynced = true;
         out.printf("目标 %.1f° (%u)，出发位置 %.1f° (%u)\n",
-                   scs::countsToDeg(target), target, scs::countsToDeg(before), before);
+                   rawToUserDeg(target), target, rawToUserDeg(before), before);
         for (int i = 0; i < 6; i++) {
             delay(250);
             uint16_t pos;
             if (scsReadU16(id, scs::REG_PRESENT_POSITION, pos))
-                out.printf("  t+%.2fs  %.1f° (%u)\n", (i + 1) * 0.25f, scs::countsToDeg(pos), pos);
+                out.printf("  t+%.2fs  %.1f° (%u)\n", (i + 1) * 0.25f, rawToUserDeg(pos), pos);
         }
         return;
     }
@@ -1081,11 +1251,24 @@ static void cmdSt(const String &args) {
             out.println("st zero 会把电机当前位置记为零位（写 EEPROM，改动出厂值）。确认请输入: st zero confirm [id]");
             return;
         }
-        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", scs::DEFAULT_ID);
+        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", g_motorId);
         uint8_t z = 0;
         scsWrite(id, scs::REG_ZERO_SET, &z, 1, true);
         uint16_t rec = 0;
         if (scsReadU16(id, scs::REG_ZERO_SET, rec)) out.printf("零位寄存器 0x16 现在 = %u\n", rec);
+        return;
+    }
+
+    // 软件归零：把当前位置记为 home（存 ESP32 NVS，不写电机 EEPROM，蓝牙即可用，掉电不丢）
+    if (sub == "home") {
+        g_sweepOn = false;
+        uint8_t id = (uint8_t)parseNum(n > 1 ? tok[1] : "", g_motorId);
+        uint16_t cur = 0;
+        if (!scsReadU16(id, scs::REG_PRESENT_POSITION, cur)) { out.printf("ID %u 无应答\n", id); return; }
+        g_zeroOffset = cur;
+        g_prefs.putInt("zero", g_zeroOffset);
+        g_target = cur; g_targetSynced = true;
+        out.printf("OK home 已设为当前位置（原始 %u 计数），现在读数 = %.1f°。掉电不丢。\n", cur, rawToUserDeg(cur));
         return;
     }
 
@@ -1095,7 +1278,7 @@ static void cmdSt(const String &args) {
             g_holdMode = (tok[1] == "on" || tok[1] == "1");
             g_prefs.putBool("hold", g_holdMode);
             g_holdSuspended = false;
-            if (g_holdMode) holdArm(scs::DEFAULT_ID, true);
+            if (g_holdMode) holdArm(g_motorId, true);
         }
         out.printf("上电保持 = %s%s\n", g_holdMode ? "开" : "关", g_holdSuspended ? "（已被 st torque off 临时松开）" : "");
         return;
@@ -1103,9 +1286,10 @@ static void cmdSt(const String &args) {
 
     if (sub == "run") {
         g_holdSuspended = false;
+        g_sweepOn = false;
         if (n < 2) { out.println("用法: st run <±度/秒> [id]（需每 <700ms 重发一次作为心跳）"); return; }
         float dps = tok[1].toFloat();
-        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", scs::DEFAULT_ID);
+        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", g_motorId);
         if (dps == 0) { runStop("run 0"); return; }
         if (dps > 720) dps = 720;
         if (dps < -720) dps = -720;
@@ -1114,38 +1298,59 @@ static void cmdSt(const String &args) {
     }
 
     if (sub == "stop") {
-        if (g_runDps == 0) out.println("STOP (未在转动)");
-        else runStop("stop");
+        bool did = false;
+        if (g_sweepOn) { g_sweepOn = false; out.println("巡航停止"); did = true; }
+        if (g_runDps != 0) { runStop("stop"); did = true; }
+        if (!did) out.println("STOP (未在转动)");
+        return;
+    }
+
+    if (sub == "sweep") {
+        if (n >= 2 && (tok[1] == "off" || tok[1] == "0")) { g_sweepOn = false; out.println("巡航停止"); return; }
+        if (n < 3) { out.println("用法: st sweep <角A> <角B> [°/s]（在两角度间连环来回，st sweep off 停）"); return; }
+        float a = tok[1].toFloat(), b = tok[2].toFloat();
+        float dps = n > 3 ? tok[3].toFloat() : 60;
+        if (dps < 1) dps = 1;  if (dps > 720) dps = 720;
+        uint8_t id = g_motorId;
+        uint8_t te = 0;
+        if (!scsReadU8(id, scs::REG_TORQUE_ENABLE, te)) { out.printf("ID %u 无应答\n", id); return; }
+        if (!te) { uint8_t one = 1; scsWrite(id, scs::REG_TORQUE_ENABLE, &one, 1, false); }
+        long ca = clampCounts(userDegToRaw(a)), cb = clampCounts(userDegToRaw(b));
+        g_sweepLo = min(ca, cb);  g_sweepHi = max(ca, cb);
+        g_sweepDps = dps;
+        runStop("sweep");                 // 停掉可能在跑的 run
+        syncTarget(id);                   // 从当前实际位置开始
+        g_sweepDir = (g_target < (g_sweepLo + g_sweepHi) / 2) ? 1 : -1;
+        g_holdSuspended = true;           // 巡航期间不抢着保持
+        g_sweepLastMs = millis();
+        g_sweepOn = true;
+        out.printf("巡航: %.1f° <-> %.1f° @ %.0f°/s（st sweep off 停）\n", a, b, dps);
         return;
     }
 
     if (sub == "go" || sub == "jog") {
         runStop("新指令");
+        g_sweepOn = false;
         g_holdSuspended = false;
         if (n < 2) { out.printf("用法: st %s <角度> [id]\n", sub.c_str()); return; }
         float deg = tok[1].toFloat();
-        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", scs::DEFAULT_ID);
+        uint8_t id = (uint8_t)parseNum(n > 2 ? tok[2] : "", g_motorId);
         uint8_t te = 0;
         if (!scsReadU8(id, scs::REG_TORQUE_ENABLE, te)) { out.printf("ID %u 无应答\n", id); return; }
-        if (!te) { uint8_t one = 1; scsWrite(id, scs::REG_TORQUE_ENABLE, &one, 1, false); }
-        uint16_t target;
+        if (!te) { uint8_t one = 1; scsWrite(id, scs::REG_TORQUE_ENABLE, &one, 1, false); syncTarget(id); }
+        long target;
         if (sub == "jog") {
-            // 相对点动：到 0°/360° 边界就截止，不取模绕圈。
-            // 电机限位 0~4095，位置模式不能跨过 0°；如果取模，在 5° 按 -15° 会算成 350°，
-            // 电机就朝反方向转 345° 过去，看起来像"发疯"
-            uint16_t cur = 0;
-            if (!scsReadU16(id, scs::REG_PRESENT_POSITION, cur)) { out.printf("ID %u 无应答\n", id); return; }
-            long t = (long)cur + lroundf(deg * scs::COUNTS_PER_REV / 360.0f);
-            if (t < 0) t = 0;
-            if (t > scs::COUNTS_PER_REV - 1) t = scs::COUNTS_PER_REV - 1;
-            target = (uint16_t)t;
+            // 相对点动：在"命令目标"上累加，不必每次以当前位置为基准——连点能连续平滑地跟。
+            // 首次点动先把目标对齐当前实际位置，避免跳变。
+            if (!g_targetSynced) syncTarget(id);
+            target = clampCounts(g_target + lroundf(deg * scs::COUNTS_PER_REV / 360.0f));
         } else {
-            // 绝对角度：只接受 0~359.9，同样不取模
-            if (deg < 0 || deg >= 360.0f) { out.println("角度范围 0~359.9"); return; }
-            target = scs::degToCounts(deg);
+            // 绝对角度：相对 home，带符号（左负右正）。只夹到物理一圈 0~4095，不做人为限位。
+            target = clampCounts(userDegToRaw(deg));
         }
-        scsWrite16(id, scs::REG_GOAL_POSITION, target, false);
-        out.printf("OK %s -> %.1f° (%u)\n", sub.c_str(), scs::countsToDeg(target), target);
+        g_target = target; g_targetSynced = true;
+        scsWrite16(id, scs::REG_GOAL_POSITION, (uint16_t)target, false);
+        out.printf("OK %s -> %.1f° (%ld)\n", sub.c_str(), rawToUserDeg(target), target);
         return;
     }
 
@@ -1153,7 +1358,7 @@ static void cmdSt(const String &args) {
         if (n < 3) { out.println("用法: st read <addr> <n> [id]"); return; }
         uint8_t addr = (uint8_t)parseNum(tok[1], 0);
         uint8_t cnt = (uint8_t)parseNum(tok[2], 1);
-        uint8_t id = (uint8_t)parseNum(n > 3 ? tok[3] : "", scs::DEFAULT_ID);
+        uint8_t id = (uint8_t)parseNum(n > 3 ? tok[3] : "", g_motorId);
         scs::Reply r;
         if (scsRead(id, addr, cnt, r, true)) {
             out.printf("寄存器 0x%02X:", addr);
@@ -1170,11 +1375,11 @@ static void cmdSt(const String &args) {
         uint8_t addr = (uint8_t)parseNum(tok[1], 0);
         // 数据 = tok[2..]，全部按十六进制；如果最后一个 token 以 "id=" 开头则是 ID，
         // 末尾带 "force" 才允许写 0x16/0x17
-        uint8_t id = scs::DEFAULT_ID;
+        uint8_t id = g_motorId;
         int last = n;
         bool force = false;
         if (tok[last - 1] == "force") { force = true; last--; }
-        if (last > 2 && tok[last - 1].startsWith("id=")) { id = (uint8_t)parseNum(tok[last - 1].substring(3), scs::DEFAULT_ID); last--; }
+        if (last > 2 && tok[last - 1].startsWith("id=")) { id = (uint8_t)parseNum(tok[last - 1].substring(3), g_motorId); last--; }
         if ((addr == scs::REG_ZERO_SET || addr == scs::REG_ZERO_SET + 1) && !force) {
             out.println("拒绝：0x16 不是飞特表里的 D 参数，实测写入任何值都会把当前位置记为零位（原出厂值 8）。");
             out.println("      要设零位请用 st zero；确实要直接写请在命令末尾加 force");
@@ -1349,6 +1554,8 @@ void setup() {
     out.println();
     out.println("==== FZYT-28 云台控制固件 / Waveshare ESP32-S3-DEV-KIT-N8R8 ====");
     out.printf("BLE 广播名: %s（Nordic UART 服务，网页 webapp/index.html 可连接）\n", g_bleName.c_str());
+    detectMotorId();
+    ensureMotorTuning();
     cmdStatus();
 #if PTZ_MASTER_ON_AT_BOOT
     out.println("发送 MasterOn（与原 RV1126B 驱动初始化行为一致）");
@@ -1356,10 +1563,13 @@ void setup() {
 #endif
     g_prefs.begin("fzyt", false);
     g_holdMode = g_prefs.getBool("hold", true);
+    g_zeroOffset = g_prefs.getInt("zero", 0);   // 软件零点，掉电不丢
+    g_servoOpenUs = g_prefs.getInt("svo", SERVO_MIN_US);      // 舵机开合标定
+    g_servoClosedUs = g_prefs.getInt("svc", SERVO_MAX_US);
     out.printf("上电保持: %s（st hold on|off 修改）\n", g_holdMode ? "开" : "关");
     if (g_holdMode) {
         // 电机可能比 ESP32 晚上电，多试几次；仍不行就交给 holdService 每 2s 重试
-        for (int i = 0; i < 3 && !holdArm(scs::DEFAULT_ID, true); i++) delay(300);
+        for (int i = 0; i < 3 && !holdArm(g_motorId, true); i++) delay(300);
     }
     out.println("输入 help 查看命令");
 }
@@ -1369,7 +1579,7 @@ void loop() {
         g_ledRestoreAt = 0;
         ledMode();
     }
-    if (!g_bridge) { runService(); holdService(); }
+    if (!g_bridge) { runService(); sweepService(); holdService(); }
     ledService();
     servoService();
 

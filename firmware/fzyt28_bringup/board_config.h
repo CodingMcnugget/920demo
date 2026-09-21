@@ -28,9 +28,15 @@
 
 // 舵机（标准 50Hz 脉宽舵机，如 SG90 / MG90S / MG996R）
 #define SERVO_PIN           4       // 排针 P1 第 3 脚，信号线（3.3V 电平，舵机都认）
-#define SERVO_MIN_US        500     // 0° 对应脉宽；SG90 常见 500~2500，部分舵机是 1000~2000
-#define SERVO_MAX_US        2500    // 180° 对应脉宽
+#define SERVO_MIN_US        500     // 默认"全开(0°)"脉宽（可用 servo setopen 标定后存 NVS 覆盖）
+#define SERVO_MAX_US        2500    // 默认"全关(180°)"脉宽（可用 servo setclosed 标定）
 #define SERVO_MAX_DEG       180
+// 标定探索用的脉宽硬限（比 500~2500 略宽，方便找到机构真正的全开/全关端点；
+// 多数 MG/SG 舵机能接受，若在极限处发出嗡嗡声/发烫说明顶到机械限位，往回退一点）
+// MG90S 标准行程约 180°（500~2500µs），转不过自己的机械限位。开合对齐靠半齿轮机械自调，
+// 固件给标准 0-180° 即可。这两个是脉宽硬限（= 0°/180°），也是标定端点的默认值。
+#define SERVO_EXPLORE_MIN_US SERVO_MIN_US
+#define SERVO_EXPLORE_MAX_US SERVO_MAX_US
 
 // 灯（PWM 调光）：小 LED 经 330Ω 直接驱动；灯带/大功率灯经 MOSFET 模块
 #define LED_PWM_PIN         5       // 排针 P1 第 4 脚

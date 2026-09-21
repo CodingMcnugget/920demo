@@ -9,13 +9,23 @@
 //   16 位寄存器为大端（高字节在前）。写指令没有应答，读指令有。
 //   实测应答包的第二个头字节固定为 F5 而不是 FF，解析时不校验这一位。
 //
-// 已在真机验证的寄存器（其余地址的含义需向厂家索取寄存器表）：
-//   0x05 ID（出厂 2）      0x06 波特率码（2 = 1 Mbps）
-//   0x09 最小角度限位(2B)  0x0B 最大角度限位(2B)，出厂 0 ~ 4095
-//   0x21 模式（0 = 位置）  0x28 扭矩使能（出厂 0，必须写 1 才会动）
-//   0x2A 目标位置(2B)      0x38 当前位置(2B)，4096 计数 = 一圈
-//   0x2E 按飞特表应为目标速度，但写入无效（读回恒为 0）
-//   0x3E/0x3F 电压/温度读回恒为 0；0x3C/0x42/0x45 无应答
+// 寄存器地址来自厂家上位机 swj v4.03（云台执行器控制系统）逆向 + 真机验证：
+//   0x05 ID              0x09 最小角限位(2B)  0x0B 最大角限位(2B) 出厂 0~4095
+//   0x07 堵转电流阈值(2B) 0x0D 温度保护  0x0E 电压上限  0x0F 电压下限
+//   0x10 最大扭矩(2B)     出厂 30000（不是 1000！上位机界面 0~1000 只是输入框范围）
+//   0x14 中位调整(2B)     0x16 预设位/零位(2B) 写任意值 = 把当前位置记为零位（出厂 8）
+//   0x1C 工作模式         0x1D 电机方向（0 = 正）
+//   0x1F/0x20/0x21 位置环 P/I/D（s8，出厂 0/0/0）
+//   0x22/0x23/0x24 速度环 P/I/D（s8，出厂 0/0/4）
+//   0x28 扭矩使能（出厂 0，必须写 1 才会动） 0x2A 目标位置(2B) 0x38 当前位置(2B)
+//   0x3A 当前速度
+//   ⚠ 早期把 0x15 当 P、0x21 当模式都是误判：真正的 PID 在 0x1F/0x22。
+//
+// 【云台自激振荡的根因与解法（2026-09-21 真机确认）】
+//   出厂速度环 D(0x24)=4 阻尼过低 → 带 66g 配重时位置环欠阻尼，移动/保持时约 4Hz 自激
+//   振荡（"疯狂晃头"）。厂家建议"调 D"：把 0x24 加到 24，振荡消失，到位精准、保持峰峰
+//   ≈0.1°。见固件 ensureMotorTuning()。0x10=30000 是出厂正常值，无需改。
+//   0x06=恢复出厂指令（INST_RESET，会把 EEPROM 复位为出厂默认，ID/波特率保留）。
 // ============================================================================
 
 #include <Arduino.h>
@@ -24,18 +34,22 @@ namespace scs {
 
 enum : uint8_t {
     INST_PING = 0x01, INST_READ = 0x02, INST_WRITE = 0x03,
-    INST_REG_WRITE = 0x04, INST_ACTION = 0x05, INST_SYNC_WRITE = 0x83,
+    INST_REG_WRITE = 0x04, INST_ACTION = 0x05, INST_RESET = 0x06,
+    INST_SYNC_WRITE = 0x83,
 };
 
 enum : uint8_t {
-    REG_ID = 0x05, REG_BAUD = 0x06, REG_MIN_ANGLE = 0x09, REG_MAX_ANGLE = 0x0B,
-    REG_POS_P = 0x15,       // 位置环 P，出厂 77。写 20 后到位晃动更大，别乱调
-    REG_ZERO_SET = 0x16,    // ⚠ 2 字节。不是飞特表的 D！写任意值 = 把当前位置记为零位（出厂 8）
-    REG_MODE = 0x21, REG_TORQUE_ENABLE = 0x28, REG_GOAL_POSITION = 0x2A,
-    REG_GOAL_TIME = 0x2C,   // 能写能读，但实测对速度无作用
-    REG_GOAL_SPEED = 0x2E,  // 写入无效
+    REG_ID = 0x05, REG_MIN_ANGLE = 0x09, REG_MAX_ANGLE = 0x0B,
+    REG_MAX_TORQUE = 0x10,  // 2 字节，出厂 30000（正常，别改）
+    REG_ZERO_SET = 0x16,    // ⚠ 2 字节。写任意值 = 把当前位置记为零位（出厂 8）
+    REG_POS_P = 0x1F, REG_POS_I = 0x20, REG_POS_D = 0x21,   // 位置环 PID（s8，出厂 0/0/0）
+    REG_SPD_P = 0x22, REG_SPD_I = 0x23, REG_SPD_D = 0x24,   // 速度环 PID（s8，出厂 0/0/4）
+    REG_TORQUE_ENABLE = 0x28, REG_GOAL_POSITION = 0x2A,
     REG_PRESENT_POSITION = 0x38, REG_PRESENT_SPEED = 0x3A,
 };
+
+// 速度环 D 的目标值：出厂 4 欠阻尼会自激振荡，加到这个值消除（见头部说明）
+constexpr uint8_t SPD_D_TUNED = 24;
 
 constexpr uint8_t  DEFAULT_ID = 2;
 constexpr uint16_t COUNTS_PER_REV = 4096;
