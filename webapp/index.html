@@ -225,8 +225,10 @@ const RX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';   // 我们写
 const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';   // 电机通知
 
 const $ = id => document.getElementById(id);
-let device = null, rxChar = null, pollTimer = null, busy = false;
+let device = null, rxChar = null, pollTimer = null, busy = false, connected = false;
 const enc = new TextEncoder(), dec = new TextDecoder();
+// 传输模式：从 ESP32 热点用 http 打开 = WiFi 模式(fetch)；从 GitHub Pages(https)/本地(file) = 蓝牙模式
+const WIFI = location.protocol === 'http:';
 
 function log(line, dir) {
   const el = $('log');
@@ -250,6 +252,7 @@ function bluetoothStatus() {
 }
 
 function setConnected(on, name) {
+  connected = on;
   $('dot').classList.toggle('on', on);
   $('state').textContent = on ? `已连接 ${name}` : '未连接';
   $('btnConnect').disabled = on;
@@ -259,9 +262,8 @@ function setConnected(on, name) {
   if (!on) { $('deg').textContent = '--'; $('counts').textContent = '--'; $('torque').textContent = '--'; }
 }
 
-// 电机的回应是文本行，从中挑出位置和扭矩状态
-function onNotify(ev) {
-  const text = dec.decode(ev.target.value);
+// 解析电机/固件返回的文本行（蓝牙通知 或 WiFi 的 /cmd 响应，格式相同）
+function handleIncoming(text) {
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     log(line.trim(), '←');
@@ -271,16 +273,22 @@ function onNotify(ev) {
     if (t) $('torque').textContent = t[1];
     const g = line.match(/^OK (go|jog) -> (-?[\d.]+)°/);
     if (g) $('torque').textContent = '开';
-    const su = line.match(/\((\d+) µs\)/);          // 舵机 -> X° (Y µs)
+    const su = line.match(/\((\d+) µs\)/);
     if (su) { servoCurUs = parseInt(su[1]); $('servoUs').textContent = su[1]; }
-    const sc = line.match(/当前=(\d+)µs/);           // servo cal
+    const sc = line.match(/当前=(\d+)µs/);
     if (sc) { servoCurUs = parseInt(sc[1]); $('servoUs').textContent = sc[1]; }
   }
 }
+function onNotify(ev) { handleIncoming(dec.decode(ev.target.value)); }   // 蓝牙通知
 
 async function send(cmd) {
-  if (!rxChar) return;
   log(cmd, '→');
+  if (WIFI) {
+    try { const r = await fetch('/cmd?c=' + encodeURIComponent(cmd)); handleIncoming(await r.text()); }
+    catch (e) { log('发送失败: ' + e.message, '!'); }
+    return;
+  }
+  if (!rxChar) return;
   const data = enc.encode(cmd + '\n');
   try {
     if (rxChar.properties.writeWithoutResponse) await rxChar.writeValueWithoutResponse(data);
@@ -332,7 +340,7 @@ async function action(cmd) {
 // 按住持续转动：按下每 300ms 发一次 st run（固件 700ms 没收到就自动停），松开发 st stop
 let holdTimer = null;
 function holdStart(btn, sign) {
-  if (!rxChar || holdTimer) return;
+  if (!connected || holdTimer) return;
   stopSweepUI();
   btn.classList.add('active');
   busy = true;                                   // 按住期间暂停位置轮询，让总线只跑 run
