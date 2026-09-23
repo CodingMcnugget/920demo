@@ -397,7 +397,8 @@ static void cmdHelp() {
     out.println("  st jog <±角度> [id]          相对当前位置转动，例: st jog -15");
     out.println("  st run <±度/秒> [id]         持续转动（每 <700ms 重发一次当心跳，到边界自动停）");
     out.println("  st stop                      停止持续转动/巡航");
-    out.println("  st sweep <角A> <角B> [°/s]   头部连环左右巡航（固件自主跑，无需心跳；st sweep off 停）");
+    out.println("  st sweep <角A> <角B> [°/s]   头部连环左右巡航（绝对角度；st sweep off 停）");
+    out.println("  st cruise <幅度°> [°/s]      以当前位置为中心±幅度来回巡航（st cruise off 停）");
     out.println("  st hold on|off               上电保持：ESP32 开机就锁住电机，扭矩掉了自动补（存 NVS，默认开）");
     out.println("  st read <addr> <n> [id]      读寄存器，例: st read 0x38 2");
     out.println("  st write <addr> <hex..> [id=N] [force]  写寄存器（16 位大端），例: st write 0x2A 07 24");
@@ -1325,6 +1326,34 @@ static void cmdSt(const String &args) {
         g_sweepLastMs = millis();
         g_sweepOn = true;
         out.printf("巡航: %.1f° <-> %.1f° @ %.0f°/s（st sweep off 停）\n", a, b, dps);
+        return;
+    }
+
+    // 以当前位置为中心 ±幅度 来回巡航。固件自己同步读当前位置，网页不必先读角度，避免算错中心。
+    if (sub == "cruise") {
+        if (n >= 2 && (tok[1] == "off" || tok[1] == "0")) { g_sweepOn = false; out.println("巡航停止"); return; }
+        if (n < 2) { out.println("用法: st cruise <幅度°> [°/s]（以当前位置为中心±幅度来回，st cruise off 停）"); return; }
+        float amp = fabsf(tok[1].toFloat());
+        float dps = n > 2 ? tok[2].toFloat() : 60;
+        if (dps < 1) dps = 1;  if (dps > 720) dps = 720;
+        uint8_t id = g_motorId;
+        uint8_t te = 0;
+        if (!scsReadU8(id, scs::REG_TORQUE_ENABLE, te)) { out.printf("ID %u 无应答\n", id); return; }
+        if (!te) { uint8_t one = 1; scsWrite(id, scs::REG_TORQUE_ENABLE, &one, 1, false); }
+        uint16_t cur = 0;
+        if (!scsReadU16(id, scs::REG_PRESENT_POSITION, cur)) { out.printf("ID %u 无应答\n", id); return; }
+        long ampc = lroundf(amp * scs::COUNTS_PER_REV / 360.0f);
+        g_sweepLo = clampCounts((long)cur - ampc);
+        g_sweepHi = clampCounts((long)cur + ampc);
+        g_sweepDps = dps;
+        runStop("cruise");
+        g_target = cur; g_targetSynced = true;
+        g_sweepDir = 1;
+        g_holdSuspended = true;
+        g_sweepLastMs = millis();
+        g_sweepOn = true;
+        out.printf("巡航(当前±%.0f°): %.1f° <-> %.1f° @ %.0f°/s（st cruise off 停）\n",
+                   amp, rawToUserDeg(g_sweepLo), rawToUserDeg(g_sweepHi), dps);
         return;
     }
 

@@ -391,14 +391,12 @@ $('btnGoHome').onclick = () => { stopSweepUI(); action('st go 0'); };
 let sweeping = false, breathing = false, servoSweeping = false;
 function setSweepUI(on) { sweeping = on; $('btnSweep').classList.toggle('active', on); $('btnSweep').textContent = on ? '■ 停止巡航' : '⟳ 开始巡航'; }
 function stopSweepUI() { if (sweeping) setSweepUI(false); }   // 手动运动时只更新界面（固件已自动停巡航）
-$('btnSweep').onclick = async () => {
+$('btnSweep').onclick = () => {
   if (sweeping) { setSweepUI(false); action('st stop'); return; }
-  await send('st pos');                              // 先拿到当前角度
-  const cur = parseFloat($('deg').textContent);
-  if (isNaN(cur)) { log('读不到当前位置，无法巡航', '!'); return; }
   const amp = Math.abs(parseFloat($('swAmp').value)) || 30;
   setSweepUI(true);
-  action('st sweep ' + Math.round(cur - amp) + ' ' + Math.round(cur + amp) + ' ' + $('speed').value);
+  // 固件端 st cruise 会自己读当前位置作中心，网页不用先读角度（BLE 下异步会读到旧值）
+  action('st cruise ' + amp + ' ' + $('speed').value);
 };
 function setBreatheUI(on) { breathing = on; $('btnBreathe').classList.toggle('active', on); $('btnBreathe').textContent = on ? '■ 停呼吸' : '♨ 呼吸'; }
 function stopBreatheUI() { if (breathing) setBreatheUI(false); }
