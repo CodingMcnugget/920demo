@@ -89,11 +89,9 @@
     <button id="holdR" class="hold">按住右转 ▶▶</button>
   </div>
   <div class="row" style="margin-top:8px">
-    <span class="muted">连环巡航</span>
-    <input id="swA" type="number" value="-60" style="width:64px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text)">
-    <span class="muted">~</span>
-    <input id="swB" type="number" value="60" style="width:64px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text)">
-    <span class="muted">°</span>
+    <span class="muted">连环巡航 幅度±</span>
+    <input id="swAmp" type="number" value="30" style="width:56px; padding:8px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text)">
+    <span class="muted">°（以当前位置为中心）</span>
     <span style="flex:1"></span>
     <button id="btnSweep" class="hold">⟳ 开始巡航</button>
   </div>
@@ -393,9 +391,14 @@ $('btnGoHome').onclick = () => { stopSweepUI(); action('st go 0'); };
 let sweeping = false, breathing = false, servoSweeping = false;
 function setSweepUI(on) { sweeping = on; $('btnSweep').classList.toggle('active', on); $('btnSweep').textContent = on ? '■ 停止巡航' : '⟳ 开始巡航'; }
 function stopSweepUI() { if (sweeping) setSweepUI(false); }   // 手动运动时只更新界面（固件已自动停巡航）
-$('btnSweep').onclick = () => {
-  if (sweeping) { setSweepUI(false); action('st stop'); }
-  else { setSweepUI(true); action('st sweep ' + $('swA').value + ' ' + $('swB').value + ' ' + $('speed').value); }
+$('btnSweep').onclick = async () => {
+  if (sweeping) { setSweepUI(false); action('st stop'); return; }
+  await send('st pos');                              // 先拿到当前角度
+  const cur = parseFloat($('deg').textContent);
+  if (isNaN(cur)) { log('读不到当前位置，无法巡航', '!'); return; }
+  const amp = Math.abs(parseFloat($('swAmp').value)) || 30;
+  setSweepUI(true);
+  action('st sweep ' + Math.round(cur - amp) + ' ' + Math.round(cur + amp) + ' ' + $('speed').value);
 };
 function setBreatheUI(on) { breathing = on; $('btnBreathe').classList.toggle('active', on); $('btnBreathe').textContent = on ? '■ 停呼吸' : '♨ 呼吸'; }
 function stopBreatheUI() { if (breathing) setBreatheUI(false); }
